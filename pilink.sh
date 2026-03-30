@@ -11,16 +11,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/pilink.conf"
 
-# Defaults
-HOST="${PILINK_HOST:-pi}"
-SERVICE="${PILINK_SERVICE:-}"
-DEPLOY_DIR="${PILINK_DEPLOY_DIR:-}"
-
-# Load config file if it exists (user-owned — treat as trusted input)
+# Load config file first (provides defaults)
 if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
 fi
+
+# Environment variables override config file values
+HOST="${PILINK_HOST:-${HOST:-pi}}"
+SERVICE="${PILINK_SERVICE:-${SERVICE:-}}"
+DEPLOY_DIR="${PILINK_DEPLOY_DIR:-${DEPLOY_DIR:-}}"
 
 # ─── Input Validation ────────────────────────────────────────────────────────
 
@@ -79,7 +79,7 @@ validate_deploy_dir() {
             echo "Error: DEPLOY_DIR must be an absolute path: $DEPLOY_DIR"
             exit 1
         fi
-        if ! [[ "$DEPLOY_DIR" =~ ^[a-zA-Z0-9/._ -]+$ ]]; then
+        if ! [[ "$DEPLOY_DIR" =~ ^[a-zA-Z0-9/._[:space:]-]+$ ]]; then
             echo "Error: DEPLOY_DIR contains disallowed characters: $DEPLOY_DIR"
             echo "Only alphanumeric, slashes, dots, hyphens, underscores, and spaces allowed."
             exit 1
@@ -155,7 +155,7 @@ require_deploy_dir() {
 # ─── Commands ────────────────────────────────────────────────────────────────
 
 cmd_ping() {
-    "${SSH_CMD[@]}" "echo 'SSH OK — \$(hostname) — \$(date)'"
+    "${SSH_CMD[@]}" 'echo "SSH OK — $(hostname) — $(date)"'
 }
 
 cmd_info() {
@@ -377,7 +377,7 @@ cmd_test_config() {
     echo "Config file: ${CONFIG_FILE}"
     echo ""
     echo "=== SSH Test ==="
-    if "${SSH_CMD[@]}" "echo 'Connected to \$(hostname) as \$(whoami)'" 2>/dev/null; then
+    if "${SSH_CMD[@]}" 'echo "Connected to $(hostname) as $(whoami)"' 2>/dev/null; then
         echo "SSH: OK"
     else
         echo "SSH: FAILED — check your SSH config and key"
