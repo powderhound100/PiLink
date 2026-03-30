@@ -11,7 +11,8 @@
 <p align="center"><b>Your AI can't SSH. Now it doesn't have to.</b></p>
 
 <p align="center">
-One script turns Claude Code into a Pi operator — running commands, editing files,<br>
+A script and skill set that turns Claude Code or the GitHub CLI<br>
+into a companion Pi developer — running commands, editing files,<br>
 managing services, and shipping code to your Raspberry Pi over the air.
 </p>
 
