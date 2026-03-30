@@ -6,27 +6,44 @@
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
 
-# PiLink
+<h1 align="center">PiLink</h1>
 
-**SSH pipeline tool for Claude Code ↔ Raspberry Pi collaboration.**
+<p align="center"><b>Give your AI hands on your Raspberry Pi.</b></p>
 
-PiLink wraps SSH and SCP into simple, scriptable subcommands so that [Claude Code](https://claude.ai/claude-code) (or any AI coding assistant) can operate on a remote Raspberry Pi directly from your dev machine — executing commands, reading/writing files, managing services, and deploying code over the air.
+<p align="center">
+One script. 17 commands. Full remote control.<br>
+Let Claude Code (or any AI assistant) <i>execute commands, edit files, manage services, and deploy code</i> on your Pi — without ever touching raw SSH.
+</p>
 
-> Built for the [GROUNDLINK](https://github.com/powderhound100/groundlink-leo-comms) project — a multi-SDR Raspberry Pi node for ADS-B, UAT, and FM radio streaming.
+---
+
+```bash
+$ bash pilink.sh exec "vcgencmd measure_temp"
+temp=42.0'C
+
+$ echo '{"api_key": "new"}' | bash pilink.sh write /opt/app/config.json
+$ bash pilink.sh deploy
+=== OTA Deploy Starting ===
+[1/3] Git pull... Already up to date.
+[2/3] Building... OK
+[3/3] Restarting service... active (running)
+=== Deploy Complete ===
+```
 
 ---
 
 ## Why PiLink?
 
-When using AI coding assistants like Claude Code, you often need the AI to interact with remote hardware — but giving it raw SSH access is messy and error-prone. PiLink solves this by providing:
+AI coding assistants are powerful — but they can't reach your hardware. You end up copy-pasting terminal output back and forth, or writing brittle SSH one-liners that break on the first special character.
 
-- **Simple subcommands** — `ping`, `exec`, `read`, `write`, `deploy`, etc.
-- **Base64-safe file writes** — binary and special characters handled correctly
-- **Service management** — start/stop/restart/logs via systemd
-- **One-command OTA deploys** — `git pull → build → restart` in a single call
-- **SSH key setup** — generates and installs ed25519 keys automatically
-- **Config file** — one file to set host, service, and deploy directory
-- **Zero dependencies** — just bash, ssh, and scp (all pre-installed on most systems)
+**PiLink fixes that.** Drop one script into your project, point it at your Pi, and your AI assistant gets safe, structured access to:
+
+- **Run anything remotely** — `exec`, `sudo`, with proper quoting and escaping
+- **Read and write files** — base64-safe transport handles binary and special characters
+- **Manage systemd services** — start / stop / restart / logs in one command
+- **Deploy over the air** — `git pull` → `build` → `restart` with a single `deploy`
+- **Set up in 60 seconds** — auto-generates SSH keys, prints the config, done
+- **Zero dependencies** — just bash + ssh + scp (already on your machine)
 
 ---
 

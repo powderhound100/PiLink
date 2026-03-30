@@ -17,13 +17,58 @@ HOST="${PILINK_HOST:-pi}"
 SERVICE="${PILINK_SERVICE:-}"
 DEPLOY_DIR="${PILINK_DEPLOY_DIR:-}"
 
-# Load config file if it exists
+# Load config file if it exists (user-owned — treat as trusted input)
 if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
 fi
 
 SSH="ssh $HOST"
+
+# ─── Input Validation ────────────────────────────────────────────────────────
+
+# Escape a string for safe use inside single quotes in a remote shell command
+# Replaces ' with '\'' (end quote, escaped literal quote, reopen quote)
+quote_path() {
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+}
+
+# Validate that an argument is a positive integer
+require_integer() {
+    local val="$1"
+    local name="$2"
+    if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+        echo "Error: $name must be a positive integer, got: $val"
+        exit 1
+    fi
+}
+
+# Validate SERVICE name — alphanumeric, hyphens, underscores, dots, @
+validate_service() {
+    if [[ -n "$SERVICE" ]] && ! [[ "$SERVICE" =~ ^[a-zA-Z0-9@._-]+$ ]]; then
+        echo "Error: SERVICE contains invalid characters: $SERVICE"
+        echo "Only alphanumeric, hyphens, underscores, dots, and @ are allowed."
+        exit 1
+    fi
+}
+
+# Validate DEPLOY_DIR — must be absolute path, no shell metacharacters
+validate_deploy_dir() {
+    if [[ -n "$DEPLOY_DIR" ]]; then
+        if ! [[ "$DEPLOY_DIR" =~ ^/ ]]; then
+            echo "Error: DEPLOY_DIR must be an absolute path: $DEPLOY_DIR"
+            exit 1
+        fi
+        if [[ "$DEPLOY_DIR" =~ [;\|\&\$\`\(] ]]; then
+            echo "Error: DEPLOY_DIR contains shell metacharacters: $DEPLOY_DIR"
+            exit 1
+        fi
+    fi
+}
+
+# Run validation on config values at load time
+validate_service
+validate_deploy_dir
 
 # ─── Usage ───────────────────────────────────────────────────────────────────
 usage() {
@@ -115,26 +160,48 @@ cmd_sudo() {
 
 cmd_read() {
     [[ $# -lt 1 ]] && { echo "Usage: pilink.sh read /path/to/file"; exit 1; }
-    $SSH "cat '$1'"
+    local safe_path
+    safe_path=$(quote_path "$1")
+    $SSH "cat '${safe_path}'"
 }
 
 cmd_write() {
     [[ $# -lt 1 ]] && { echo "Usage: pilink.sh write /path/to/file  (reads stdin)"; exit 1; }
-    local remote_path="$1"
+    local safe_path
+    safe_path=$(quote_path "$1")
     local encoded
     encoded=$(base64 -w0)
-    $SSH "echo '$encoded' | base64 -d > '$remote_path'"
+    # base64 output is [A-Za-z0-9+/=\n] — safe inside single quotes
+    $SSH "echo '${encoded}' | base64 -d > '${safe_path}'"
 }
 
 cmd_edit() {
     [[ $# -lt 3 ]] && { echo "Usage: pilink.sh edit /path/to/file \"old\" \"new\""; exit 1; }
-    local file="$1"
-    local old="$2"
-    local new="$3"
-    local old_escaped new_escaped
-    old_escaped=$(printf '%s\n' "$old" | sed 's/[&/\]/\\&/g; s/$/\\/' | sed '$ s/\\$//')
-    new_escaped=$(printf '%s\n' "$new" | sed 's/[&/\]/\\&/g; s/$/\\/' | sed '$ s/\\$//')
-    $SSH "sed -i 's/${old_escaped}/${new_escaped}/g' '$file'"
+    local safe_path old_b64 new_b64
+    safe_path=$(quote_path "$1")
+    # Send old/new as base64 to avoid all escaping issues with sed and SSH layers
+    old_b64=$(printf '%s' "$2" | base64 -w0)
+    new_b64=$(printf '%s' "$3" | base64 -w0)
+    $SSH bash -s <<REMOTE
+old=\$(echo '${old_b64}' | base64 -d)
+new=\$(echo '${new_b64}' | base64 -d)
+# Use perl for reliable literal string replacement (no regex metachar issues)
+perl -pi -e "
+    \\\$old_str = \\\$ENV{PILINK_OLD};
+    \\\$new_str = \\\$ENV{PILINK_NEW};
+    s/\Q\\\$old_str/\\\$new_str/g;
+" '${safe_path}' 2>/dev/null && echo "Edit applied." || {
+    # Fallback to python if perl unavailable
+    python3 -c "
+import sys
+f = '${safe_path}'
+with open(f) as fh: content = fh.read()
+content = content.replace(sys.argv[1], sys.argv[2])
+with open(f, 'w') as fh: fh.write(content)
+print('Edit applied.')
+" "\$old" "\$new"
+}
+REMOTE
 }
 
 cmd_push() {
@@ -149,15 +216,18 @@ cmd_pull() {
 
 cmd_tail() {
     [[ $# -lt 1 ]] && { echo "Usage: pilink.sh tail /path/to/file [n]"; exit 1; }
-    local file="$1"
+    local safe_path
+    safe_path=$(quote_path "$1")
     local lines="${2:-20}"
-    $SSH "tail -n $lines '$file'"
+    require_integer "$lines" "line count"
+    $SSH "tail -n ${lines} '${safe_path}'"
 }
 
 cmd_logs() {
     require_service
     local lines="${1:-50}"
-    $SSH "sudo journalctl -u $SERVICE --no-pager -n $lines"
+    require_integer "$lines" "line count"
+    $SSH "sudo journalctl -u '${SERVICE}' --no-pager -n ${lines}"
 }
 
 cmd_status() {
@@ -172,8 +242,8 @@ echo "Memory:   \$(free -h | awk '/Mem:/{print \$3 "/" \$2}')"
 echo "Disk:     \$(df -h / | awk 'NR==2{print \$3 "/" \$2 " (" \$5 " used)"}')"
 echo ""
 $(if [[ -n "$SERVICE" ]]; then
-    echo "echo '=== Service: $SERVICE ==='"
-    echo "sudo systemctl status $SERVICE --no-pager 2>/dev/null || echo 'Service not found'"
+    echo "echo '=== Service: ${SERVICE} ==='"
+    echo "sudo systemctl status '${SERVICE}' --no-pager 2>/dev/null || echo 'Service not found'"
 else
     echo "echo '=== Services (no default configured) ==='"
 fi)
@@ -185,17 +255,17 @@ REMOTE
 
 cmd_restart() {
     require_service
-    $SSH "sudo systemctl restart $SERVICE && echo 'Service restarted' && sudo systemctl status $SERVICE --no-pager"
+    $SSH "sudo systemctl restart '${SERVICE}' && echo 'Service restarted' && sudo systemctl status '${SERVICE}' --no-pager"
 }
 
 cmd_start() {
     require_service
-    $SSH "sudo systemctl start $SERVICE && echo 'Service started' && sudo systemctl status $SERVICE --no-pager"
+    $SSH "sudo systemctl start '${SERVICE}' && echo 'Service started' && sudo systemctl status '${SERVICE}' --no-pager"
 }
 
 cmd_stop() {
     require_service
-    $SSH "sudo systemctl stop $SERVICE && echo 'Service stopped'"
+    $SSH "sudo systemctl stop '${SERVICE}' && echo 'Service stopped'"
 }
 
 cmd_deploy() {
@@ -204,20 +274,20 @@ cmd_deploy() {
     $SSH bash -s <<REMOTE
 set -e
 echo "[1/3] Git pull..."
-cd $DEPLOY_DIR && sudo git pull
+cd '${DEPLOY_DIR}' && sudo git pull
 
 echo "[2/3] Building..."
-if [ -f $DEPLOY_DIR/build.sh ]; then
-    cd $DEPLOY_DIR && sudo bash build.sh
+if [ -f '${DEPLOY_DIR}/build.sh' ]; then
+    cd '${DEPLOY_DIR}' && sudo bash build.sh
 else
     echo "No build.sh found, skipping build step"
 fi
 
 echo "[3/3] Restarting service..."
 $(if [[ -n "$SERVICE" ]]; then
-    echo "sudo systemctl restart $SERVICE"
+    echo "sudo systemctl restart '${SERVICE}'"
     echo "sleep 2"
-    echo "sudo systemctl status $SERVICE --no-pager"
+    echo "sudo systemctl status '${SERVICE}' --no-pager"
 else
     echo "echo 'No service configured — skipping restart'"
 fi)
