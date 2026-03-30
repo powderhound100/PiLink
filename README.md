@@ -8,11 +8,11 @@
 
 <h1 align="center">PiLink</h1>
 
-<p align="center"><b>Give your AI hands on your Raspberry Pi.</b></p>
+<p align="center"><b>Your AI can't SSH. Now it doesn't have to.</b></p>
 
 <p align="center">
-One script. 17 commands. Full remote control.<br>
-Let Claude Code (or any AI assistant) <i>execute commands, edit files, manage services, and deploy code</i> on your Pi — without ever touching raw SSH.
+One script turns Claude Code into a Pi operator — running commands, editing files,<br>
+managing services, and shipping code to your Raspberry Pi over the air.
 </p>
 
 ---
