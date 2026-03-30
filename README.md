@@ -49,14 +49,40 @@ AI coding assistants are powerful — but they can't reach your hardware. You en
 
 ## Quick Start
 
-### 1. Clone
+### Option A: Guided Setup (recommended)
+
+```bash
+git clone https://github.com/powderhound100/PiLink.git
+cd PiLink
+bash setup.sh
+```
+
+The setup wizard walks you through 5 steps:
+
+```
+  ╔══════════════════════════════════════════╗
+  ║         PiLink Setup Wizard              ║
+  ║   SSH pipeline for Claude Code + Pi      ║
+  ╚══════════════════════════════════════════╝
+
+  [1/5] Pi Connection Details    — IP, username, SSH alias
+  [2/5] SSH Key Setup            — generates ed25519 key
+  [3/5] SSH Config               — writes ~/.ssh/config entry
+  [4/5] Install Key on Pi        — one-time password prompt
+  [5/5] PiLink Configuration     — writes pilink.conf
+         ✓ Verifies connection   — pings Pi and shows system info
+```
+
+### Option B: Manual Setup
+
+**1. Clone**
 
 ```bash
 git clone https://github.com/powderhound100/PiLink.git
 cd PiLink
 ```
 
-### 2. Configure
+**2. Configure**
 
 Edit `pilink.conf` with your Pi's details:
 
@@ -66,7 +92,7 @@ SERVICE="my-app"                 # systemd service name (optional)
 DEPLOY_DIR="/opt/my-app"         # remote git repo for OTA deploys (optional)
 ```
 
-### 3. Set Up SSH (one-time)
+**3. Set Up SSH (one-time)**
 
 If you don't already have passwordless SSH to your Pi:
 
@@ -86,10 +112,10 @@ Host pi
     HostName 10.0.0.245          # Your Pi's IP address
     User pi                       # Your Pi's username
     IdentityFile ~/.ssh/pilink_pi
-    StrictHostKeyChecking no
+    StrictHostKeyChecking accept-new
 ```
 
-### 4. Test
+**4. Test**
 
 ```bash
 bash pilink.sh ping
@@ -254,9 +280,13 @@ Claude Code will then use PiLink automatically whenever it needs to interact wit
 
 ```
 PiLink/
-├── pilink.sh          # Main script — all commands in one file
+├── setup.sh           # Interactive setup wizard (start here)
+├── pilink.sh          # Main script — 17 commands in one file
 ├── pilink.conf        # Configuration (host, service, deploy dir)
-├── CLAUDE.md          # Instructions for Claude Code
+├── .claude/
+│   └── skills/pi/
+│       └── SKILL.md   # Claude Code /pi slash command skill
+├── CLAUDE.md          # Claude Code integration instructions
 ├── README.md          # This file
 ├── LICENSE            # MIT License
 └── .gitignore
