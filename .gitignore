@@ -1,0 +1,17 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Don't commit local config overrides
+pilink.local.conf
+
+# SSH keys (never commit these)
+*.pem
+id_*
