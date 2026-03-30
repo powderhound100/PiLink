@@ -8,7 +8,6 @@
 set -euo pipefail
 
 # ─── Configuration ───────────────────────────────────────────────────────────
-# Override via environment: PILINK_HOST, PILINK_SERVICE, PILINK_DEPLOY_DIR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/pilink.conf"
 
@@ -23,12 +22,32 @@ if [[ -f "$CONFIG_FILE" ]]; then
     source "$CONFIG_FILE"
 fi
 
-SSH="ssh $HOST"
-
 # ─── Input Validation ────────────────────────────────────────────────────────
 
-# Escape a string for safe use inside single quotes in a remote shell command
-# Replaces ' with '\'' (end quote, escaped literal quote, reopen quote)
+# Validate HOST — must look like a hostname, user@host, or IP. No spaces,
+# shell metacharacters, or flags (leading dash) allowed. This prevents SSH
+# option injection via PILINK_HOST env var.
+validate_host() {
+    if [[ -z "$HOST" ]]; then
+        echo "Error: HOST is empty."
+        exit 1
+    fi
+    # Block anything that doesn't match: optional user@ + hostname/IP chars
+    # Allowed: alphanumeric, dots, hyphens, underscores, colons (IPv6), @
+    if ! [[ "$HOST" =~ ^[a-zA-Z0-9@._:-]+$ ]]; then
+        echo "Error: HOST contains invalid characters: $HOST"
+        echo "Only alphanumeric, dots, hyphens, underscores, colons, and @ allowed."
+        exit 1
+    fi
+    # Block leading dash (SSH option injection)
+    if [[ "$HOST" == -* ]]; then
+        echo "Error: HOST cannot start with a dash: $HOST"
+        exit 1
+    fi
+}
+
+# Escape a string for safe use inside single quotes in a remote shell command.
+# Replaces ' with '\'' (end quote, escaped literal quote, reopen quote).
 quote_path() {
     printf '%s' "$1" | sed "s/'/'\\\\''/g"
 }
@@ -52,23 +71,29 @@ validate_service() {
     fi
 }
 
-# Validate DEPLOY_DIR — must be absolute path, no shell metacharacters
+# Validate DEPLOY_DIR — must be absolute path with only safe path characters.
+# Allowlist approach: permit alphanumeric, slashes, dots, hyphens, underscores.
 validate_deploy_dir() {
     if [[ -n "$DEPLOY_DIR" ]]; then
         if ! [[ "$DEPLOY_DIR" =~ ^/ ]]; then
             echo "Error: DEPLOY_DIR must be an absolute path: $DEPLOY_DIR"
             exit 1
         fi
-        if [[ "$DEPLOY_DIR" =~ [;\|\&\$\`\(] ]]; then
-            echo "Error: DEPLOY_DIR contains shell metacharacters: $DEPLOY_DIR"
+        if ! [[ "$DEPLOY_DIR" =~ ^[a-zA-Z0-9/._ -]+$ ]]; then
+            echo "Error: DEPLOY_DIR contains disallowed characters: $DEPLOY_DIR"
+            echo "Only alphanumeric, slashes, dots, hyphens, underscores, and spaces allowed."
             exit 1
         fi
     fi
 }
 
-# Run validation on config values at load time
+# Run all validation at load time
+validate_host
 validate_service
 validate_deploy_dir
+
+# Build SSH command as an array to avoid word-splitting issues
+SSH_CMD=(ssh "$HOST")
 
 # ─── Usage ───────────────────────────────────────────────────────────────────
 usage() {
@@ -130,11 +155,11 @@ require_deploy_dir() {
 # ─── Commands ────────────────────────────────────────────────────────────────
 
 cmd_ping() {
-    $SSH "echo 'SSH OK — \$(hostname) — \$(date)'"
+    "${SSH_CMD[@]}" "echo 'SSH OK — \$(hostname) — \$(date)'"
 }
 
 cmd_info() {
-    $SSH bash -s <<'REMOTE'
+    "${SSH_CMD[@]}" bash -s <<'REMOTE'
 echo "Hostname: $(hostname)"
 echo "Uptime:   $(uptime -p)"
 echo "Kernel:   $(uname -r)"
@@ -150,68 +175,74 @@ REMOTE
 
 cmd_exec() {
     [[ $# -lt 1 ]] && { echo "Usage: pilink.sh exec \"command\""; exit 1; }
-    $SSH "$*"
+    "${SSH_CMD[@]}" "$*"
 }
 
 cmd_sudo() {
     [[ $# -lt 1 ]] && { echo "Usage: pilink.sh sudo \"command\""; exit 1; }
-    $SSH "sudo $*"
+    "${SSH_CMD[@]}" "sudo $*"
 }
 
 cmd_read() {
     [[ $# -lt 1 ]] && { echo "Usage: pilink.sh read /path/to/file"; exit 1; }
     local safe_path
     safe_path=$(quote_path "$1")
-    $SSH "cat '${safe_path}'"
+    "${SSH_CMD[@]}" "cat '${safe_path}'"
 }
 
 cmd_write() {
     [[ $# -lt 1 ]] && { echo "Usage: pilink.sh write /path/to/file  (reads stdin)"; exit 1; }
     local safe_path
     safe_path=$(quote_path "$1")
-    local encoded
-    encoded=$(base64 -w0)
-    # base64 output is [A-Za-z0-9+/=\n] — safe inside single quotes
-    $SSH "echo '${encoded}' | base64 -d > '${safe_path}'"
+    # Stream via stdin instead of embedding in command line to avoid ARG_MAX
+    # limits on large files. base64 on the remote side reads from stdin.
+    base64 -w0 | "${SSH_CMD[@]}" "base64 -d > '${safe_path}'"
 }
 
 cmd_edit() {
     [[ $# -lt 3 ]] && { echo "Usage: pilink.sh edit /path/to/file \"old\" \"new\""; exit 1; }
     local safe_path old_b64 new_b64
     safe_path=$(quote_path "$1")
-    # Send old/new as base64 to avoid all escaping issues with sed and SSH layers
+    # Send old/new as base64 to avoid all escaping issues across SSH + shell layers
     old_b64=$(printf '%s' "$2" | base64 -w0)
     new_b64=$(printf '%s' "$3" | base64 -w0)
-    $SSH bash -s <<REMOTE
+    # base64 output is [A-Za-z0-9+/=] — safe inside single quotes
+    "${SSH_CMD[@]}" bash -s <<REMOTE
 old=\$(echo '${old_b64}' | base64 -d)
 new=\$(echo '${new_b64}' | base64 -d)
 # Use perl for reliable literal string replacement (no regex metachar issues)
-perl -pi -e "
-    \\\$old_str = \\\$ENV{PILINK_OLD};
-    \\\$new_str = \\\$ENV{PILINK_NEW};
-    s/\Q\\\$old_str/\\\$new_str/g;
-" '${safe_path}' 2>/dev/null && echo "Edit applied." || {
+# Export to env so perl can access without shell interpolation
+export PILINK_OLD="\$old"
+export PILINK_NEW="\$new"
+perl -pi -e '
+    \$o = \$ENV{"PILINK_OLD"};
+    \$n = \$ENV{"PILINK_NEW"};
+    s/\Q\$o/\$n/g;
+' '${safe_path}' 2>/dev/null && echo "Edit applied." || {
     # Fallback to python if perl unavailable
     python3 -c "
-import sys
-f = '${safe_path}'
-with open(f) as fh: content = fh.read()
-content = content.replace(sys.argv[1], sys.argv[2])
-with open(f, 'w') as fh: fh.write(content)
+import os, sys
+path = os.environ['PILINK_PATH']
+old_s = os.environ['PILINK_OLD']
+new_s = os.environ['PILINK_NEW']
+with open(path) as fh: content = fh.read()
+content = content.replace(old_s, new_s)
+with open(path, 'w') as fh: fh.write(content)
 print('Edit applied.')
-" "\$old" "\$new"
+" 2>/dev/null || echo "Error: neither perl nor python3 available on remote host"
 }
 REMOTE
 }
 
 cmd_push() {
     [[ $# -lt 2 ]] && { echo "Usage: pilink.sh push local_file remote_path"; exit 1; }
-    scp "$1" "${HOST}:$2"
+    # Use -- to prevent scp from interpreting remote path as options
+    scp -- "$1" "${HOST}:$2"
 }
 
 cmd_pull() {
     [[ $# -lt 2 ]] && { echo "Usage: pilink.sh pull remote_path local_file"; exit 1; }
-    scp "${HOST}:$1" "$2"
+    scp -- "${HOST}:$1" "$2"
 }
 
 cmd_tail() {
@@ -220,18 +251,20 @@ cmd_tail() {
     safe_path=$(quote_path "$1")
     local lines="${2:-20}"
     require_integer "$lines" "line count"
-    $SSH "tail -n ${lines} '${safe_path}'"
+    "${SSH_CMD[@]}" "tail -n ${lines} '${safe_path}'"
 }
 
 cmd_logs() {
     require_service
     local lines="${1:-50}"
     require_integer "$lines" "line count"
-    $SSH "sudo journalctl -u '${SERVICE}' --no-pager -n ${lines}"
+    "${SSH_CMD[@]}" "sudo journalctl -u '${SERVICE}' --no-pager -n ${lines}"
 }
 
 cmd_status() {
-    $SSH bash -s <<REMOTE
+    local safe_deploy_dir
+    safe_deploy_dir=$(quote_path "$DEPLOY_DIR")
+    "${SSH_CMD[@]}" bash -s <<REMOTE
 echo "=== System ==="
 echo "Hostname: \$(hostname)"
 echo "Uptime:   \$(uptime -p)"
@@ -255,30 +288,32 @@ REMOTE
 
 cmd_restart() {
     require_service
-    $SSH "sudo systemctl restart '${SERVICE}' && echo 'Service restarted' && sudo systemctl status '${SERVICE}' --no-pager"
+    "${SSH_CMD[@]}" "sudo systemctl restart '${SERVICE}' && echo 'Service restarted' && sudo systemctl status '${SERVICE}' --no-pager"
 }
 
 cmd_start() {
     require_service
-    $SSH "sudo systemctl start '${SERVICE}' && echo 'Service started' && sudo systemctl status '${SERVICE}' --no-pager"
+    "${SSH_CMD[@]}" "sudo systemctl start '${SERVICE}' && echo 'Service started' && sudo systemctl status '${SERVICE}' --no-pager"
 }
 
 cmd_stop() {
     require_service
-    $SSH "sudo systemctl stop '${SERVICE}' && echo 'Service stopped'"
+    "${SSH_CMD[@]}" "sudo systemctl stop '${SERVICE}' && echo 'Service stopped'"
 }
 
 cmd_deploy() {
     require_deploy_dir
+    local safe_deploy_dir
+    safe_deploy_dir=$(quote_path "$DEPLOY_DIR")
     echo "=== OTA Deploy Starting ==="
-    $SSH bash -s <<REMOTE
+    "${SSH_CMD[@]}" bash -s <<REMOTE
 set -e
 echo "[1/3] Git pull..."
-cd '${DEPLOY_DIR}' && sudo git pull
+cd '${safe_deploy_dir}' && sudo git pull
 
 echo "[2/3] Building..."
-if [ -f '${DEPLOY_DIR}/build.sh' ]; then
-    cd '${DEPLOY_DIR}' && sudo bash build.sh
+if [ -f '${safe_deploy_dir}/build.sh' ]; then
+    cd '${safe_deploy_dir}' && sudo bash build.sh
 else
     echo "No build.sh found, skipping build step"
 fi
@@ -297,8 +332,17 @@ REMOTE
 }
 
 cmd_setup_key() {
-    local key_name="pilink_$(echo "$HOST" | tr '.' '_')"
+    # Sanitize HOST for use in filename — keep only safe chars
+    local key_name="pilink_$(echo "$HOST" | tr -cd 'a-zA-Z0-9_-')"
     local key_path="$HOME/.ssh/${key_name}"
+
+    # Safety: verify key_path is inside ~/.ssh/
+    local real_ssh_dir
+    real_ssh_dir="$(cd "$HOME/.ssh" 2>/dev/null && pwd)"
+    case "$key_path" in
+        "${real_ssh_dir}/"*) ;; # OK
+        *) echo "Error: computed key path escapes ~/.ssh/: $key_path"; exit 1 ;;
+    esac
 
     if [[ -f "$key_path" ]]; then
         echo "SSH key already exists at $key_path"
@@ -307,7 +351,7 @@ cmd_setup_key() {
     fi
 
     echo "Generating SSH key: $key_path"
-    ssh-keygen -t ed25519 -f "$key_path" -N "" -C "pilink-${HOST}"
+    ssh-keygen -t ed25519 -f "$key_path" -N "" -C "pilink-${key_name}"
 
     echo ""
     echo "Installing public key on $HOST..."
@@ -319,7 +363,8 @@ cmd_setup_key() {
     echo ""
     echo "  Host $HOST"
     echo "    IdentityFile $key_path"
-    echo "    StrictHostKeyChecking no"
+    echo "    # Consider using: StrictHostKeyChecking accept-new"
+    echo "    # (trusts on first connect, rejects if host key changes)"
     echo ""
     echo "Test with: bash pilink.sh ping"
 }
@@ -332,7 +377,7 @@ cmd_test_config() {
     echo "Config file: ${CONFIG_FILE}"
     echo ""
     echo "=== SSH Test ==="
-    if $SSH "echo 'Connected to \$(hostname) as \$(whoami)'" 2>/dev/null; then
+    if "${SSH_CMD[@]}" "echo 'Connected to \$(hostname) as \$(whoami)'" 2>/dev/null; then
         echo "SSH: OK"
     else
         echo "SSH: FAILED — check your SSH config and key"
